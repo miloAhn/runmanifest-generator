@@ -42,7 +42,4 @@ This tool automatically handles all of the above and generates a valid `RunManif
 
 ---
 
-## 📦 Requirements
 
-```bash
-pip install streamlit pandas
