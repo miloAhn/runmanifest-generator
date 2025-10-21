@@ -58,7 +58,17 @@ def process_samples(df, output_dir):
         for row in settings:
             f.write(",".join(row) + "\n")
         f.write("[SAMPLES],,,\n")
+        
+        # Write the user-uploaded samples first
         df.to_csv(f, index=False)
+        
+        # --- MODIFICATION START ---
+        # Add static PhiX samples at the end of the [SAMPLES] section
+        f.write("PhiX,ATGTCGCTAG,,1+2\n")
+        f.write("PhiX,CACAGATCGT,,1+2\n")
+        f.write("PhiX,GCACATAGTC,,1+2\n")
+        f.write("PhiX,TGTGTCGACA,,1+2\n")
+        # --- MODIFICATION END ---
 
     return output_path
 
