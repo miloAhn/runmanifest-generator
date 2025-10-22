@@ -73,7 +73,7 @@ def process_samples(df, output_dir):
     return output_path
 
 # --- Streamlit Web Interface ---
-st.title("🧬 RunManifest Generator (with ATAC 8-mer Index auto-fix)")
+st.title("🧬 MiloAhn's RunManifest Generator (with ATAC 8-mer Index auto-fix)")
 
 uploaded_file = st.file_uploader("Upload your sample sheet (.csv)", type="csv")
 
