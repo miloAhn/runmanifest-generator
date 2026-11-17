@@ -4,29 +4,66 @@ import tempfile
 import streamlit as st
 
 def process_samples(df, output_dir):
-    # Get all unique lanes
-    lanes = df['Lane'].unique()
-    
-    # Identify ATAC-specific lanes
-    atac_lanes = sorted(df[df['SampleName'].str.contains("ATAC", na=False)]['Lane'].unique())
+    # Clean whitespace in string columns
+    df['SampleName'] = df['SampleName'].astype(str).str.strip()
+    df['Index1'] = df['Index1'].astype(str).str.strip()
+    if 'Index2' in df.columns:
+        df['Index2'] = df['Index2'].fillna('').astype(str).str.strip()
+    else:
+        df['Index2'] = ''
 
-    # For ATAC samples with 8-mer Index1, append 'AT' to make 10-mer
-    is_atac = df['SampleName'].str.contains("ATAC", na=False)
-    is_8mer = df['Index1'].str.len() == 8
-    df.loc[is_atac & is_8mer, 'Index1'] = df.loc[is_atac & is_8mer, 'Index1'] + "AT"
+    # Get all unique lanes and create dynamic global lane string (e.g., "1", "2", or "1+2")
+    lanes = sorted(df['Lane'].unique())
+    all_lanes_str = "+".join(map(str, lanes))
     
-    # Initialize SETTINGS section
+    # Identify ATAC-specific lanes (case-insensitive)
+    is_atac_row = df['SampleName'].str.contains("ATAC", case=False, na=False)
+    atac_lanes = sorted(df[is_atac_row]['Lane'].unique())
+    
+    # Check each lane to see if ATAC and non-ATAC samples coexist
+    mixed_within_lane = {}
+    for lane in lanes:
+        lane_df = df[df['Lane'] == lane]
+        has_atac = lane in atac_lanes
+        has_non_atac = (~lane_df['SampleName'].str.contains("ATAC", case=False, na=False)).any()
+        mixed_within_lane[lane] = (has_atac and has_non_atac)
+        
+        # Append 'AT' to 8-mer ATAC only if it shares the same lane with 10-mer non-ATAC samples
+        if mixed_within_lane[lane]:
+            mask = (df['Lane'] == lane) & is_atac_row & (df['Index1'].str.len() == 8)
+            df.loc[mask, 'Index1'] = df.loc[mask, 'Index1'] + "AT"
+
+    # Initialize common SETTINGS section
     settings = [
         ["SettingName", "Value", "Lane"],
-        ["R1Adapter", "AAAAAAAAAAAAAAAAAAA", "1+2"],
-        ["R1AdapterTrim", "FALSE", "1+2"],
-        ["R2Adapter", "TTTTTTTTTTTTTTTTTTT", "1+2"],
-        ["R2AdapterTrim", "FALSE", "1+2"],
-        ["I1Mask", "I1:Y*", "1+2"],
-        ["I2Mask", "I2:N*", "1+2"],
-        ["I1FastQ", "TRUE", "1+2"],
-        ["I2FastQ", "TRUE", "1+2"]
+        ["R1Adapter", "AAAAAAAAAAAAAAAAAAA", all_lanes_str],
+        ["R1AdapterTrim", "FALSE", all_lanes_str],
+        ["R2Adapter", "TTTTTTTTTTTTTTTTTTT", all_lanes_str],
+        ["R2AdapterTrim", "FALSE", all_lanes_str]
     ]
+
+    # Configure I1Mask and I2Mask
+    if len(atac_lanes) == 0:
+        settings.append(["I1Mask", "I1:Y*", all_lanes_str])
+        settings.append(["I2Mask", "I2:Y*", all_lanes_str])
+    elif len(atac_lanes) == len(lanes) and not any(mixed_within_lane.values()):
+        settings.append(["I1Mask", "I1:Y8N*", all_lanes_str])
+        settings.append(["I2Mask", "I2:N*", all_lanes_str])
+    else:
+        for lane in lanes:
+            if lane in atac_lanes:
+                if mixed_within_lane[lane]:
+                    settings.append(["I1Mask", "I1:Y*", str(lane)])
+                else:
+                    settings.append(["I1Mask", "I1:Y8N*", str(lane)])
+                settings.append(["I2Mask", "I2:N*", str(lane)])
+            else:
+                settings.append(["I1Mask", "I1:Y*", str(lane)])
+                settings.append(["I2Mask", "I2:Y10N*", str(lane)])
+
+    # Add FastQ generation flags for Index reads
+    settings.append(["I1FastQ", "TRUE", all_lanes_str])
+    settings.append(["I2FastQ", "TRUE", all_lanes_str])
 
     # Add UMI-specific settings for ATAC lanes
     for lane in atac_lanes:
@@ -34,16 +71,14 @@ def process_samples(df, output_dir):
         settings.append(["UMIFastq", "TRUE", str(lane)])
     
     # Configure R1/R2 FastQMask depending on ATAC presence
-    if len(atac_lanes) == 0 or len(atac_lanes) == len(lanes):
-        settings.append(["R1FastQMask", "R1:Y*", "1+2"])
-        settings.append(["R2FastQMask", "R2:Y*", "1+2"])
+    if len(atac_lanes) == 0 or (len(atac_lanes) == len(lanes) and not any(mixed_within_lane.values())):
+        settings.append(["R1FastQMask", "R1:Y*", all_lanes_str])
+        settings.append(["R2FastQMask", "R2:Y*", all_lanes_str])
     else:
         for lane in lanes:
             if lane in atac_lanes:
-                # If non-ATAC samples exist in the same lane, use full R2 mask
-                other_samples_exist = df[(df['Lane'] == lane) & ~df['SampleName'].str.contains("ATAC", na=False)].shape[0] > 0
                 settings.append(["R1FastQMask", "R1:Y*", str(lane)])
-                if other_samples_exist:
+                if mixed_within_lane[lane]:
                     settings.append(["R2FastQMask", "R2:Y*", str(lane)])
                 else:
                     settings.append(["R2FastQMask", "R2:Y49N*", str(lane)])
@@ -51,29 +86,73 @@ def process_samples(df, output_dir):
                 settings.append(["R1FastQMask", "R1:Y28N*", str(lane)])
                 settings.append(["R2FastQMask", "R2:Y*", str(lane)])
 
+    # Define PhiX sequences (10-mer and 8-mer variants)
+    phix_dual_10 = [
+        ("ATGTCGCTAG", "CTAGCTCGTA"),
+        ("CACAGATCGT", "ACGAGAGTCT"),
+        ("GCACATAGTC", "GACTACTAGC"),
+        ("TGTGTCGACA", "TGTCTGACAG")
+    ]
+    phix_dual_8 = [
+        ("ATGTCGCT", "CTAGCTCG"),
+        ("CACAGATC", "ACGAGAGT"),
+        ("GCACATAG", "GACTACTA"),
+        ("TGTGTCGA", "TGTCTGAC")
+    ]
+    phix_single_8 = [
+        ("ATGTCGCT", ""),
+        ("CACAGATC", ""),
+        ("GCACATAG", ""),
+        ("TGTGTCGA", "")
+    ]
+    phix_single_10 = [
+        ("ATGTCGCTAG", ""),
+        ("CACAGATCGT", ""),
+        ("GCACATAGTC", ""),
+        ("TGTGTCGACA", "")
+    ]
+
+    # Select 8-mer or 10-mer Dual PhiX based on sample Index1 length
+    def get_dual_phix_for_df(sub_df):
+        if (sub_df['Index1'].str.len() == 8).all():
+            return phix_dual_8
+        return phix_dual_10
+
     # Save final RunManifest
     output_path = os.path.join(output_dir, "RunManifest_corrected.csv")
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write("[SETTINGS],,,\n")
         for row in settings:
             f.write(",".join(row) + "\n")
         f.write("[SAMPLES],,,\n")
         
-        # Write the user-uploaded samples first
+        # Write user-uploaded samples
         df.to_csv(f, index=False)
         
-        # --- MODIFICATION START ---
-        # Add static PhiX samples at the end of the [SAMPLES] section
-        f.write("PhiX,ATGTCGCTAG,,1+2\n")
-        f.write("PhiX,CACAGATCGT,,1+2\n")
-        f.write("PhiX,GCACATAGTC,,1+2\n")
-        f.write("PhiX,TGTGTCGACA,,1+2\n")
-        # --- MODIFICATION END ---
+        # Add PhiX samples dynamically
+        if len(atac_lanes) == 0:
+            phix_list = get_dual_phix_for_df(df)
+            for idx1, idx2 in phix_list:
+                f.write(f"PhiX,{idx1},{idx2},{all_lanes_str}\n")
+        elif len(atac_lanes) == len(lanes) and not any(mixed_within_lane.values()):
+            for idx1, idx2 in phix_single_8:
+                f.write(f"PhiX,{idx1},{idx2},{all_lanes_str}\n")
+        else:
+            for lane in lanes:
+                lane_df = df[df['Lane'] == lane]
+                if lane in atac_lanes:
+                    phix_list = phix_single_10 if mixed_within_lane[lane] else phix_single_8
+                    for idx1, idx2 in phix_list:
+                        f.write(f"PhiX,{idx1},{idx2},{lane}\n")
+                else:
+                    phix_list = get_dual_phix_for_df(lane_df)
+                    for idx1, idx2 in phix_list:
+                        f.write(f"PhiX,{idx1},{idx2},{lane}\n")
 
     return output_path
 
 # --- Streamlit Web Interface ---
-st.title("🧬 MiloAhn's RunManifest Generator (with ATAC 8-mer Index auto-fix)")
+st.title("🧬 MiloAhn's RunManifest Generator")
 
 uploaded_file = st.file_uploader("Upload your sample sheet (.csv)", type="csv")
 
